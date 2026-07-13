@@ -1,5 +1,5 @@
 Very Simple status bar for wayland (mangowm) written in zig.
-Program are not organized very well, only for personal use.
+Program is not organized very well, only for personal use.
 
 Uses the dwl ipc protocol
 
