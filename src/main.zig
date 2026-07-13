@@ -444,11 +444,11 @@ pub fn main(init: std.process.Init) !void {
         break :blk try std.zon.parse.fromSliceAlloc(Settings, gpa.allocator(), config, null, .{.ignore_unknown_fields = true});
     };
     var settings: Settings = undefined;
-    if (settings_parsed == null) {
-        settings = Settings {};
+    if (settings_parsed) |sp| {
+        settings = sp;
     }
     else {
-        settings = settings_parsed.?;
+        settings = Settings {};
     }
     scaled_height = settings.height * SCALE;
 
@@ -477,8 +477,8 @@ pub fn main(init: std.process.Init) !void {
     defer state.battery_status_file.close(io);
     defer gpa.allocator().free(state.workspaces);
     defer {
-        if (settings_parsed != null) {
-            std.zon.parse.free(gpa.allocator(), settings_parsed.?);
+        if (settings_parsed) |sp| {
+            std.zon.parse.free(gpa.allocator(), sp);
         }
     }
     const dwl_ipc = globals.dwl_ipc orelse return error.NoWldwl_ipc;
