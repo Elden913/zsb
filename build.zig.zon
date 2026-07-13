@@ -1,0 +1,21 @@
+.{
+    .name = .zsb,
+    .version = "0.16.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .pixman = .{
+            .url = "git+https://codeberg.org/ifreund/zig-pixman#387f04a0289a69d159c88b5f70396ec12a8ddb00",
+            .hash = "pixman-0.4.0-dev-LClMn0eVAAAlXnMK-MVBZkOG0urNdOPGVQdaGecXPM5O",
+        },
+        .wayland = .{
+            .url = "git+https://codeberg.org/ifreund/zig-wayland#a8e10e87e5ebb49ce518ac3d2198909c87ee615a",
+            .hash = "wayland-0.7.0-dev-lQa1kjT8AQDBstL61Gy3WCMtGwVaMN1p6w5wGfdDvP15",
+        },
+        .fcft = .{
+            .url = "git+https://git.sr.ht/~novakane/zig-fcft#4bf5be61c869d08d5bcb0306049c63a9cb0795a7",
+            .hash = "fcft-3.0.0-zcx6CxQfAADhnwm8SjyCkQF-VFHGiVarigc2de3ciInC",
+        },
+    },
+    .paths = .{""},
+    .fingerprint = 0x1891ed5276a1055,
+}
