@@ -6,8 +6,13 @@ Uses the dwl ipc protocol
 Supports:
 - Workpaces (via dwl-ipc)
 - Battery
-- Volume
+- Volume (via libpulse)
 - Time
+
+dependencies:
+- fcft
+- pixman
+- libwayland
 
 Theme loading (~/.config/zsb/settings.zon) Check src/main.zig for fields
 
