@@ -75,14 +75,17 @@ pub const State = struct {
     configured: bool = false,
     running: bool = true,
 
-    time_glyphs: []*fcft.Glyph = undefined,
+    time_glyphs: [32]*const fcft.Glyph = undefined,
+    time_buf: [32]u8 = undefined,
+    time_len: usize = 0,
+    time_text_width: i32 = 0,
 
     volfd: i32,
     vol: std.atomic.Value(u32),
     vol_prev_vol: u32 = 0,
     vol_muted: std.atomic.Value(bool),
     vol_prev_muted: bool = true,
-    vol_text_run: *const fcft.TextRun = undefined,
+    vol_text_run: ?*const fcft.TextRun = null,
     vol_text_width: i32 = 0,
     vol_text_color: u32,
 
@@ -99,7 +102,7 @@ pub const State = struct {
     bat_prev_charge_now: i32 = 0,
     bat_prev_status: u8 = 0,
 
-    bat_text_run: *const fcft.TextRun = undefined,
+    bat_text_run: ?*const fcft.TextRun = null,
     bat_text_width: i32 = 0,
     bat_text_color: u32,
 
@@ -267,11 +270,14 @@ fn draw_vol(state: *State, buf: []u8, right: i32) !i32 {
             text = try std.fmt.bufPrintZ(buf, "󰕾 {}%", .{state.vol.load(.seq_cst)});
             state.vol_text_color = settings.color;
         }
+        if (state.vol_text_run) |vtr| {
+            vtr.destroy();
+        }
         state.vol_text_run, state.vol_text_width = try createTextRun(state, text);
         state.vol_prev_vol = new_vol;
         state.vol_prev_muted = new_muted;
     }
-    renderTextRun(state, state.vol_text_run, scaled_width - state.vol_text_width - right, state.vol_text_color);
+    renderTextRun(state, state.vol_text_run.?, scaled_width - state.vol_text_width - right, state.vol_text_color);
     return state.vol_text_width;
 }
 
@@ -314,9 +320,13 @@ fn draw_bat(state: *State, buf: []u8, right: i32) !i32 {
                 state.bat_text_color = settings.critical;
             },
         }
+
+        if (state.bat_text_run) |btr| {
+            btr.destroy();
+        }
         state.bat_text_run, state.bat_text_width = try createTextRun(state, text);
     }
-    renderTextRun(state, state.bat_text_run, scaled_width - state.bat_text_width - right, state.bat_text_color);
+    renderTextRun(state, state.bat_text_run.?, scaled_width - state.bat_text_width - right, state.bat_text_color);
     return state.bat_text_width;
 }
 
@@ -334,9 +344,27 @@ fn draw_time(state: *State, buf: []u8, right: i32) !i32 {
         "%a %d/%m %H:%M:%S",
         tm,
     );
-    const time_text_run, const time_width = try createTextRun(state, buf[0..len]);
-    renderTextRun(state, time_text_run, scaled_width - time_width - right, settings.color);
-    return time_width;
+    if (len != state.time_len or
+        !std.mem.eql(u8, buf[0..len], state.time_buf[0..state.time_len]))
+    {
+        @memcpy(state.time_buf[0..len], buf[0..len]);
+        state.time_len = len;
+        state.time_text_width = 0;
+        state.time_text_width = 0;
+        for (buf[0..len], 0..) |ch, i| {
+            state.time_buf[i] = ch;
+            state.time_glyphs[i] = try state.font.rasterizeCharUtf32(ch, .default);
+            state.time_text_width += state.time_glyphs[i].advance.x;
+        }
+    }
+    const src_paint = solid_fill_cache.get(settings.color);
+    var left = scaled_width - right - state.time_text_width;
+    for (state.time_glyphs[0..len]) |glyph| {
+        pixman.Image.composite32(.over, src_paint, glyph.pix, state.image.?, 0, 0, 0, 0, left + glyph.x, state.baseline - glyph.y, glyph.width, glyph.height);
+        left += glyph.advance.x;
+    }
+
+    return state.time_text_width;
 }
 
 fn draw_right(state: *State, buf: []u8) !void {
@@ -490,6 +518,10 @@ pub fn main(init: std.process.Init) !void {
         font_names[i] = try gpa.allocator().dupeZ(u8, settings.font[i]);
     }
     const font = try fcft.Font.fromName(font_names, null);
+    for (font_names) |name| {
+        gpa.allocator().free(std.mem.span(name));
+    }
+    gpa.allocator().free(font_names);
 
     const bat_dir_path = try std.fmt.bufPrint(&buf, "/sys/class/power_supply/BAT{}/", .{settings.bat});
     const bat_dir = Io.Dir.openDirAbsolute(io, bat_dir_path, .{}) catch {
