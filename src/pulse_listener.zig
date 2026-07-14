@@ -15,15 +15,15 @@ export fn sinkInfoCallback(
     const avg_vol = pulse.pa_cvolume_avg(&i.*.volume);
     const vol_pct = (avg_vol * 100) / pulse.PA_VOLUME_NORM;
 
-    state.volume.store(vol_pct, .seq_cst);
+    state.vol.store(vol_pct, .seq_cst);
 
     const muted = i.*.mute != 0;
 
-    state.volume_muted.store(muted, .seq_cst);
+    state.vol_muted.store(muted, .seq_cst);
 
     const val: [8]u8 = @bitCast(@as(u64, 1));
     
-    main.panic_errno_usize(std.os.linux.write(state.volumefd, &val, 8));
+    main.panic_errno_usize(std.os.linux.write(state.volfd, &val, 8));
 }
 
 export fn subscribeCallback(

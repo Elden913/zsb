@@ -21,14 +21,18 @@ const Workspace = struct {
     urgent: bool,
     shown: bool,
 };
- 
+
+var DEFAULT_FONT = [_][]const u8{"monospace:size=30"};
+
 const Settings = struct {
-    background:      u32 = 0xFF0f1416,
-    color:           u32 = 0xFFdee3e6,
-    tag_focused_fg:  u32 = 0xFFdee3e6,
-    tag_focused_bg:  u32 = 0xFF252b2d,
-    tag_urgent_fg:   u32 = 0xFF690005,
-    tag_urgent_bg:   u32 = 0xFFffb4ab,
+    font: [][]const u8 = DEFAULT_FONT[0..],
+
+    background: u32 = 0xFF0f1416,
+    color: u32 = 0xFFdee3e6,
+    tag_focused_fg: u32 = 0xFFdee3e6,
+    tag_focused_bg: u32 = 0xFF252b2d,
+    tag_urgent_fg: u32 = 0xFF690005,
+    tag_urgent_bg: u32 = 0xFFffb4ab,
     tag_inactive_fg: u32 = 0xFFbfc8cc,
     tag_inactive_bg: u32 = 0xFF1b2023,
 
@@ -42,6 +46,9 @@ const Settings = struct {
     separator_width: i32 = 3,
     separator_color: u32 = 0xFF252b2d,
     height: i32 = 25,
+
+    bat: i32 = 0,
+    bat_redraw_interval: u32 = 4,
 };
 
 const BUF_LEN: usize = 128;
@@ -65,26 +72,44 @@ pub const State = struct {
     image: ?*pixman.Image,
     surface: *wl.Surface,
 
-    configured: bool,
-    running: bool,
+    configured: bool = false,
+    running: bool = true,
 
-    volumefd: i32,
-    volume: std.atomic.Value(u32),
-    volume_muted: std.atomic.Value(bool),
+    time_glyphs: []*fcft.Glyph = undefined,
 
-    battery_charge_full: i32,
-    battery_current_now_file: Io.File,
-    battery_charge_now_file: Io.File,
-    battery_status_file: Io.File,
+    volfd: i32,
+    vol: std.atomic.Value(u32),
+    vol_prev_vol: u32 = 0,
+    vol_muted: std.atomic.Value(bool),
+    vol_prev_muted: bool = true,
+    vol_text_run: *const fcft.TextRun = undefined,
+    vol_text_width: i32 = 0,
+    vol_text_color: u32,
+
+    bat_charge_full: i32,
+    bat_current_now_file: Io.File,
+    bat_charge_now_file: Io.File,
+    bat_status_file: Io.File,
+
+    bat_current_now: i32 = 0,
+    bat_charge_now: i32 = 0,
+    bat_status: u8 = 0,
+
+    bat_prev_current_now: i32 = 0,
+    bat_prev_charge_now: i32 = 0,
+    bat_prev_status: u8 = 0,
+
+    bat_text_run: *const fcft.TextRun = undefined,
+    bat_text_width: i32 = 0,
+    bat_text_color: u32,
 
     workspacefd: i32,
     workspaces: []Workspace,
 
-    prev_tear_left: i32,
-    prev_tear_right: i32,
-
-    settings: Settings,
+    prev_tear_left: i32 = 0,
+    prev_tear_right: i32 = 0,
 };
+var settings: Settings = undefined;
 
 fn dwl_ipc_manager_listener(dwl_ipc_manager: *zdwl.IpcManagerV2, event: zdwl.IpcManagerV2.Event, state: *State) void {
     _ = dwl_ipc_manager;
@@ -152,7 +177,6 @@ fn layer_surface_listener(layer_surface: *zwlr.LayerSurfaceV1, event: zwlr.Layer
 const fcft = @import("fcft");
 const pixman = @import("pixman");
 const unicode = std.unicode;
-var font_names = [_][*:0]const u8{ "Iosvmata Nerd Font:size=30", "Noto Color Emoji:size=18" };
 
 inline fn pixman_color_from_u32(color: u32) pixman.Color {
     const alpha = (color & 0xff000000) >> 24;
@@ -230,62 +254,76 @@ fn createTextRun(state: *State, text: []const u8) !struct { *const fcft.TextRun,
     return .{ text_run, width };
 }
 
-fn draw_volume(state: *State, buf: []u8, right: i32) !i32 {
+fn draw_vol(state: *State, buf: []u8, right: i32) !i32 {
     var text: []u8 = undefined;
-    var color: u32 = undefined;
-    if (state.volume_muted.load(.seq_cst)) {
-        text = try std.fmt.bufPrintZ(buf, "󰖁 {}%", .{state.volume.load(.seq_cst)});
-        color = state.settings.idle;
-    } else {
-        text = try std.fmt.bufPrintZ(buf, "󰕾 {}%", .{state.volume.load(.seq_cst)});
-        color = state.settings.color;
+    const new_vol = state.vol.load(.seq_cst);
+    const new_muted = state.vol_muted.load(.seq_cst);
+
+    if (new_vol != state.vol_prev_vol or new_muted != state.vol_prev_muted) {
+        if (new_muted) {
+            text = try std.fmt.bufPrintZ(buf, "󰖁 {}%", .{state.vol.load(.seq_cst)});
+            state.vol_text_color = settings.idle;
+        } else {
+            text = try std.fmt.bufPrintZ(buf, "󰕾 {}%", .{state.vol.load(.seq_cst)});
+            state.vol_text_color = settings.color;
+        }
+        state.vol_text_run, state.vol_text_width = try createTextRun(state, text);
+        state.vol_prev_vol = new_vol;
+        state.vol_prev_muted = new_muted;
     }
-    const vol_text_run, const vol_width = try createTextRun(state, text);
-    renderTextRun(state, vol_text_run, scaled_width - vol_width - right, color);
-    return vol_width;
+    renderTextRun(state, state.vol_text_run, scaled_width - state.vol_text_width - right, state.vol_text_color);
+    return state.vol_text_width;
 }
 
-fn draw_battery(state: *State, buf: []u8, right: i32) !i32 {
-    const charge_now_len = try Io.File.readPositionalAll(state.battery_charge_now_file, io, buf, 0);
-    const charge_now = try std.fmt.parseInt(i32, buf[0 .. charge_now_len - 1], 10);
-    const current_now_len = try Io.File.readPositionalAll(state.battery_current_now_file, io, buf, 0);
-    const current_now = try std.fmt.parseInt(i32, buf[0 .. current_now_len - 1], 10);
-    _ = try Io.File.readPositionalAll(state.battery_status_file, io, buf[0..1], 0);
-    const battery_percentage = @divFloor(charge_now * 100, state.battery_charge_full);
+fn query_bat(state: *State, buf: []u8) !void {
+    state.bat_prev_charge_now = state.bat_charge_now;
+    state.bat_prev_current_now = state.bat_current_now;
+    state.bat_prev_status = state.bat_status;
+    const charge_now_len = try Io.File.readPositionalAll(state.bat_charge_now_file, io, buf, 0);
+    state.bat_charge_now = try std.fmt.parseInt(i32, buf[0 .. charge_now_len - 1], 10);
+    const current_now_len = try Io.File.readPositionalAll(state.bat_current_now_file, io, buf, 0);
+    state.bat_current_now = try std.fmt.parseInt(i32, buf[0 .. current_now_len - 1], 10);
+    _ = try Io.File.readPositionalAll(state.bat_status_file, io, buf[0..1], 0);
+    state.bat_status = buf[0];
+}
+
+fn draw_bat(state: *State, buf: []u8, right: i32) !i32 {
+    const bat_percentage = @divFloor(state.bat_charge_now * 100, state.bat_charge_full);
     var text: []u8 = undefined;
-    var color: u32 = undefined;
-    switch (buf[0]) {
-        'C' => {
-            const charge_remaining = state.battery_charge_full - charge_now;
-            const hrs = @divFloor(charge_remaining, current_now);
-            const mnts = @divFloor(@mod(charge_remaining, current_now) * 60, current_now);
-            text = try std.fmt.bufPrintZ(buf, "󰂄 {}% > {}h {}m", .{ battery_percentage, hrs, mnts });
-            color = state.settings.good;
-        },
-        'D' => {
-            const hrs = @divFloor(charge_now, current_now);
-            const mnts = @divFloor(@mod(charge_now, current_now) * 60, current_now);
-            text = try std.fmt.bufPrintZ(buf, "󱊢 {}% > {}h {}m", .{ battery_percentage, hrs, mnts });
-            color = state.settings.color;
-        },
-        'F' => {
-            text = try std.fmt.bufPrintZ(buf, "󰁹 {}% > full", .{battery_percentage});
-            color = state.settings.color;
-        },
-        else => {
-            text = try std.fmt.bufPrintZ(buf, "NO INFO BAT", .{});
-            color = state.settings.critical;
-        },
+    if (state.bat_prev_charge_now != state.bat_charge_now or state.bat_prev_current_now != state.bat_current_now or state.bat_prev_status != state.bat_status) {
+        switch (state.bat_status) {
+            'C' => {
+                const charge_remaining = state.bat_charge_full - state.bat_charge_now;
+                const hrs = @divFloor(charge_remaining, state.bat_current_now);
+                const mnts = @divFloor(@mod(charge_remaining, state.bat_current_now) * 60, state.bat_current_now);
+                text = try std.fmt.bufPrintZ(buf, "󰂄 {}% > {}h {}m", .{ bat_percentage, hrs, mnts });
+                state.bat_text_color = settings.good;
+            },
+            'D' => {
+                const hrs = @divFloor(state.bat_charge_now, state.bat_current_now);
+                const mnts = @divFloor(@mod(state.bat_charge_now, state.bat_current_now) * 60, state.bat_current_now);
+                text = try std.fmt.bufPrintZ(buf, "󱊢 {}% > {}h {}m", .{ bat_percentage, hrs, mnts });
+                state.bat_text_color = settings.color;
+            },
+            'F' => {
+                text = try std.fmt.bufPrintZ(buf, "󰁹 {}% > full", .{bat_percentage});
+                state.bat_text_color = settings.color;
+            },
+            else => {
+                text = try std.fmt.bufPrintZ(buf, "NO INFO BAT", .{});
+                state.bat_text_color = settings.critical;
+            },
+        }
+        state.bat_text_run, state.bat_text_width = try createTextRun(state, text);
     }
-    const battery_text_run, const battery_width = try createTextRun(state, text);
-    renderTextRun(state, battery_text_run, scaled_width - battery_width - right, color);
-    return battery_width;
+    renderTextRun(state, state.bat_text_run, scaled_width - state.bat_text_width - right, state.bat_text_color);
+    return state.bat_text_width;
 }
 
 fn draw_separator(state: *State, buf: []u8, right: i32) i32 {
     _ = buf;
-    _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, scaled_width - right - state.settings.separator_width - state.settings.separator_gap, 0, state.settings.separator_width, scaled_height, state.settings.separator_color);
-    return state.settings.separator_gap * 2 + state.settings.separator_width;
+    _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, scaled_width - right - settings.separator_width - settings.separator_gap, 0, settings.separator_width, scaled_height, settings.separator_color);
+    return settings.separator_gap * 2 + settings.separator_width;
 }
 fn draw_time(state: *State, buf: []u8, right: i32) !i32 {
     const time = c.time(null);
@@ -293,29 +331,29 @@ fn draw_time(state: *State, buf: []u8, right: i32) !i32 {
     const len = c.strftime(
         &buf[0],
         BUF_LEN,
-        "%a %d/%m %H:%M",
+        "%a %d/%m %H:%M:%S",
         tm,
     );
     const time_text_run, const time_width = try createTextRun(state, buf[0..len]);
-    renderTextRun(state, time_text_run, scaled_width - time_width - right, state.settings.color);
+    renderTextRun(state, time_text_run, scaled_width - time_width - right, settings.color);
     return time_width;
 }
 
 fn draw_right(state: *State, buf: []u8) !void {
-    _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, 0, 0, scaled_width, scaled_height, state.settings.background);
+    _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, 0, 0, scaled_width, scaled_height, settings.background);
     var right: i32 = 0;
-    right += state.settings.separator_gap;
+    right += settings.separator_gap;
     right += try draw_time(state, buf, right);
     right += draw_separator(state, buf, right);
-    right += try draw_volume(state, buf, right);
+    right += try draw_vol(state, buf, right);
     right += draw_separator(state, buf, right);
-    right += try draw_battery(state, buf, right);
+    right += try draw_bat(state, buf, right);
 
     const max_tear = @max(state.prev_tear_right, right);
-    _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, scaled_width - max_tear, 0, max_tear - right, scaled_height, state.settings.background);
+    _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, scaled_width - max_tear, 0, max_tear - right, scaled_height, settings.background);
 
     state.surface.damageBuffer(scaled_width - max_tear, 0, max_tear, scaled_height);
-    state.prev_tear_right = max_tear;
+    state.prev_tear_right = right;
     state.surface.attach(state.buffer, 0, 0);
     state.surface.commit();
 }
@@ -324,24 +362,25 @@ fn draw_left(state: *State) !void {
     var n_shown: i32 = 0;
     for (state.workspaces, 0..state.workspaces.len) |wp, i| {
         if (wp.shown) {
-            var bgcol: u32 = state.settings.tag_inactive_bg;
-            var fgcol: u32 = state.settings.tag_inactive_fg;
+            var bgcol: u32 = settings.tag_inactive_bg;
+            var fgcol: u32 = settings.tag_inactive_fg;
             if (wp.active) {
-                bgcol = state.settings.tag_focused_bg;
-                fgcol = state.settings.tag_focused_fg;
+                bgcol = settings.tag_focused_bg;
+                fgcol = settings.tag_focused_fg;
             } else if (wp.urgent) {
-                bgcol = state.settings.tag_urgent_bg;
-                fgcol = state.settings.tag_urgent_fg;
+                bgcol = settings.tag_urgent_bg;
+                fgcol = settings.tag_urgent_fg;
             }
-            _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, @intCast(n_shown * state.settings.tag_width), 0, state.settings.tag_width, scaled_height, bgcol);
-            draw_char_centered(state, @as(u8, @intCast(i + 1)) + '0', @intCast(n_shown * state.settings.tag_width + @divFloor(state.settings.tag_width, 2)), fgcol);
+            _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, @intCast(n_shown * settings.tag_width), 0, settings.tag_width, scaled_height, bgcol);
+            draw_char_centered(state, @as(u8, @intCast(i + 1)) + '0', @intCast(n_shown * settings.tag_width + @divFloor(settings.tag_width, 2)), fgcol);
             n_shown += 1;
         }
     }
-    const max_tear = @max(state.prev_tear_left, n_shown * state.settings.tag_width);
-    _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, n_shown * state.settings.tag_width, 0, max_tear, scaled_height, state.settings.background);
+    const tear_left = n_shown * settings.tag_width;
+    const max_tear = @max(state.prev_tear_left, tear_left);
+    _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, tear_left, 0, max_tear, scaled_height, settings.background);
     state.surface.damageBuffer(0, 0, max_tear, scaled_height);
-    state.prev_tear_left = max_tear;
+    state.prev_tear_left = tear_left;
     state.surface.attach(state.buffer, 0, 0);
     state.surface.commit();
 }
@@ -423,14 +462,6 @@ pub fn main(init: std.process.Init) !void {
     defer layer_shell.destroy();
     const layer_surface = try layer_shell.getLayerSurface(surface, output, .top, "status_bar");
     defer layer_surface.destroy();
-    const font = try fcft.Font.fromName(font_names[0..], null);
-
-    const battery_charge_full = blk: {
-        const battery_charge_full_file = try Io.Dir.openFileAbsolute(io, "/sys/class/power_supply/BAT1/charge_full", .{});
-        defer battery_charge_full_file.close(io);
-        const battery_charge_full_len = try Io.File.readPositionalAll(battery_charge_full_file, io, &buf, 0);
-        break :blk try std.fmt.parseInt(i32, buf[0 .. battery_charge_full_len - 1], 10);
-    };
 
     const settings_parsed: ?Settings = blk: {
         const config_dir = Io.Dir.openDirAbsolute(io, "/home/elden/.config/zsb/", .{}) catch {
@@ -441,59 +472,73 @@ pub fn main(init: std.process.Init) !void {
         };
         defer gpa.allocator().free(config);
 
-        break :blk try std.zon.parse.fromSliceAlloc(Settings, gpa.allocator(), config, null, .{.ignore_unknown_fields = true});
+        @setEvalBranchQuota(10000);
+        break :blk std.zon.parse.fromSliceAlloc(Settings, gpa.allocator(), config, null, .{ .ignore_unknown_fields = true }) catch inblk: {
+            std.log.err("Couldn't parse settings.zon, please fix it. Using default configuration", .{});
+            break :inblk null;
+        };
     };
-    var settings: Settings = undefined;
     if (settings_parsed) |sp| {
         settings = sp;
-    }
-    else {
-        settings = Settings {};
+    } else {
+        settings = Settings{};
     }
     scaled_height = settings.height * SCALE;
 
+    var font_names = try gpa.allocator().alloc([*:0]const u8, settings.font.len);
+    for (0..settings.font.len) |i| {
+        font_names[i] = try gpa.allocator().dupeZ(u8, settings.font[i]);
+    }
+    const font = try fcft.Font.fromName(font_names, null);
+
+    const bat_dir_path = try std.fmt.bufPrint(&buf, "/sys/class/power_supply/BAT{}/", .{settings.bat});
+    const bat_dir = Io.Dir.openDirAbsolute(io, bat_dir_path, .{}) catch {
+        std.log.err("Couldnt open dir `{s}`. Please change the `bat` field in your settings.zon to another number (default: 0)", .{bat_dir_path});
+        return error.OpenBatteryFailed;
+    };
+    const charge_full_contents = try Io.Dir.readFile(bat_dir, io, "charge_full", &buf);
+    const bat_charge_full = try std.fmt.parseInt(i32, charge_full_contents[0 .. charge_full_contents.len - 1], 10);
+
     var state = State{
         .surface = surface,
-        .configured = false,
         .baseline = @divFloor(scaled_height, 2) + @divFloor(font.ascent, 2) - @divFloor(font.descent, 2),
-        .running = true,
         .font = font,
         .image = null,
-        .battery_charge_full = battery_charge_full,
-        .battery_charge_now_file = try Io.Dir.openFileAbsolute(io, "/sys/class/power_supply/BAT1/charge_now", .{}),
-        .battery_current_now_file = try Io.Dir.openFileAbsolute(io, "/sys/class/power_supply/BAT1/current_now", .{}),
-        .battery_status_file = try Io.Dir.openFileAbsolute(io, "/sys/class/power_supply/BAT1/status", .{}),
-        .volumefd = pulsefd,
-        .volume = std.atomic.Value(u32).init(0),
-        .volume_muted = std.atomic.Value(bool).init(true),
+        .bat_charge_full = bat_charge_full,
+        .bat_charge_now_file = try bat_dir.openFile(io, "charge_now", .{}),
+        .bat_current_now_file = try bat_dir.openFile(io, "current_now", .{}),
+        .bat_status_file = try bat_dir.openFile(io, "status", .{}),
+        .bat_text_color = settings.color,
+        .volfd = pulsefd,
+        .vol = std.atomic.Value(u32).init(1),
+        .vol_muted = std.atomic.Value(bool).init(false),
+        .vol_text_color = settings.color,
         .workspacefd = workspacefd,
         .workspaces = undefined,
-        .prev_tear_left = 0,
-        .prev_tear_right = 0,
-        .settings = settings,
     };
-    defer state.battery_charge_now_file.close(io);
-    defer state.battery_current_now_file.close(io);
-    defer state.battery_status_file.close(io);
+    defer state.bat_charge_now_file.close(io);
+    defer state.bat_current_now_file.close(io);
+    defer state.bat_status_file.close(io);
     defer gpa.allocator().free(state.workspaces);
     defer {
         if (settings_parsed) |sp| {
             std.zon.parse.free(gpa.allocator(), sp);
         }
     }
+    try query_bat(&state, &buf);
     const dwl_ipc = globals.dwl_ipc orelse return error.NoWldwl_ipc;
     defer dwl_ipc.destroy();
     dwl_ipc.setListener(*State, &dwl_ipc_manager_listener, &state);
     if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
     const dwl_output = try dwl_ipc.getOutput(output);
     dwl_output.setListener(*State, &dwl_ipc_output_listener, &state);
-    
+
     const m = pulse.pa_threaded_mainloop_new();
     if (m == null) return error.PulseAudioMainloopFailed;
     defer pulse.pa_threaded_mainloop_free(m);
 
     const mapi = pulse.pa_threaded_mainloop_get_api(m);
-    const pc = pulse.pa_context_new(mapi, "Zig Volume Listener");
+    const pc = pulse.pa_context_new(mapi, "Zig vol Listener");
     if (pc == null) return error.PulseAudioContextFailed;
     defer pulse.pa_context_unref(pc);
 
@@ -513,7 +558,7 @@ pub fn main(init: std.process.Init) !void {
         .top = true,
         .right = true,
     });
-    layer_surface.setExclusiveZone(state.settings.height);
+    layer_surface.setExclusiveZone(settings.height);
     layer_surface.setListener(*State, &layer_surface_listener, &state);
 
     surface.commit();
@@ -546,6 +591,7 @@ pub fn main(init: std.process.Init) !void {
     try draw_right(&state, &buf);
     var epoll_events: [4]linux.epoll_event = undefined;
     var fd_buf: [8]u8 = undefined;
+    var secs: u32 = 0;
     while (state.running) {
         while (!display.prepareRead()) {
             if (display.dispatchPending() != .SUCCESS) return error.DispatchFailed;
@@ -557,13 +603,17 @@ pub fn main(init: std.process.Init) !void {
             if (epoll_events[o].data.fd == wlfd) {
                 wl_display_read = true;
             } else if (epoll_events[o].data.fd == timerfd) {
+                if (secs % settings.bat_redraw_interval == 0) {
+                    try query_bat(&state, &buf);
+                }
+                secs +%= 1;
                 panic_errno_usize(linux.read(timerfd, &fd_buf, 8));
                 try draw_right(&state, &buf);
             } else if (epoll_events[o].data.fd == state.workspacefd) {
                 panic_errno_usize(linux.read(state.workspacefd, &fd_buf, 8));
                 try draw_left(&state);
-            } else if (epoll_events[o].data.fd == state.volumefd) {
-                panic_errno_usize(linux.read(state.volumefd, &fd_buf, 8));
+            } else if (epoll_events[o].data.fd == state.volfd) {
+                panic_errno_usize(linux.read(state.volfd, &fd_buf, 8));
                 try draw_right(&state, &buf);
             }
         }
