@@ -1,0 +1,28 @@
+// Default settings
+.{
+    .font = .{"monospace:size=30"},
+
+    .background = 0xFF0f1416,
+    .color = 0xFFdee3e6,
+    .tag_focused_fg = 0xFFdee3e6,
+    .tag_focused_bg = 0xFF252b2d,
+    .tag_urgent_fg = 0xFF690005,
+    .tag_urgent_bg = 0xFFffb4ab,
+    .tag_inactive_fg = 0xFFbfc8cc,
+    .tag_inactive_bg = 0xFF1b2023,
+
+    .idle = 0x271D1B,
+    .info = 0xFFB5A0,
+    .good = 0xD9C58D,
+    .critical = 0xFFB4AB,
+
+    .tag_width = 60,
+    .separator_gap = 15,
+    .separator_width = 3,
+    .separator_color = 0xFF252b2d,
+    .height = 25,
+
+    .bat = 0,
+    .bat_redraw_interval = 4,
+    .right_redraw_interval = 2,
+}

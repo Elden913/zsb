@@ -49,6 +49,8 @@ const Settings = struct {
 
     bat: i32 = 0,
     bat_redraw_interval: u32 = 4,
+
+    right_redraw_interval: u32 = 2,
 };
 
 const BUF_LEN: usize = 128;
@@ -89,17 +91,17 @@ pub const State = struct {
     vol_text_width: i32 = 0,
     vol_text_color: u32,
 
-    bat_charge_full: i32,
+    bat_charge_full: u32,
     bat_current_now_file: Io.File,
     bat_charge_now_file: Io.File,
     bat_status_file: Io.File,
 
-    bat_current_now: i32 = 0,
-    bat_charge_now: i32 = 0,
+    bat_current_now: u32 = 0,
+    bat_charge_now: u32 = 0,
     bat_status: u8 = 0,
 
-    bat_prev_current_now: i32 = 0,
-    bat_prev_charge_now: i32 = 0,
+    bat_prev_current_now: u32 = 0,
+    bat_prev_charge_now: u32 = 0,
     bat_prev_status: u8 = 0,
 
     bat_text_run: ?*const fcft.TextRun = null,
@@ -286,9 +288,9 @@ fn query_bat(state: *State, buf: []u8) !void {
     state.bat_prev_current_now = state.bat_current_now;
     state.bat_prev_status = state.bat_status;
     const charge_now_len = try Io.File.readPositionalAll(state.bat_charge_now_file, io, buf, 0);
-    state.bat_charge_now = try std.fmt.parseInt(i32, buf[0 .. charge_now_len - 1], 10);
+    state.bat_charge_now = try std.fmt.parseInt(u32, buf[0 .. charge_now_len - 1], 10);
     const current_now_len = try Io.File.readPositionalAll(state.bat_current_now_file, io, buf, 0);
-    state.bat_current_now = try std.fmt.parseInt(i32, buf[0 .. current_now_len - 1], 10);
+    state.bat_current_now = try std.fmt.parseInt(u32, buf[0 .. current_now_len - 1], 10);
     _ = try Io.File.readPositionalAll(state.bat_status_file, io, buf[0..1], 0);
     state.bat_status = buf[0];
 }
@@ -302,14 +304,19 @@ fn draw_bat(state: *State, buf: []u8, right: i32) !i32 {
                 const charge_remaining = state.bat_charge_full - state.bat_charge_now;
                 const hrs = @divFloor(charge_remaining, state.bat_current_now);
                 const mnts = @divFloor(@mod(charge_remaining, state.bat_current_now) * 60, state.bat_current_now);
-                text = try std.fmt.bufPrintZ(buf, "󰂄 {}% > {}h {}m", .{ bat_percentage, hrs, mnts });
+                text = try std.fmt.bufPrintZ(buf, "󰂄 {}% > {}h {d:0>2}m", .{ bat_percentage, hrs, mnts });
                 state.bat_text_color = settings.good;
             },
             'D' => {
                 const hrs = @divFloor(state.bat_charge_now, state.bat_current_now);
                 const mnts = @divFloor(@mod(state.bat_charge_now, state.bat_current_now) * 60, state.bat_current_now);
-                text = try std.fmt.bufPrintZ(buf, "󱊢 {}% > {}h {}m", .{ bat_percentage, hrs, mnts });
-                state.bat_text_color = settings.color;
+                text = try std.fmt.bufPrintZ(buf, "󱊢 {}% > {}h {d:0>2}m", .{ bat_percentage, hrs, mnts });
+                if (bat_percentage < 15) {
+                    state.bat_text_color = settings.critical;
+                }
+                else {
+                    state.bat_text_color = settings.color;
+                }
             },
             'F' => {
                 text = try std.fmt.bufPrintZ(buf, "󰁹 {}% > full", .{bat_percentage});
@@ -341,21 +348,21 @@ fn draw_time(state: *State, buf: []u8, right: i32) !i32 {
     const len = c.strftime(
         &buf[0],
         BUF_LEN,
-        "%a %d/%m %H:%M:%S",
+        "%a %d/%m %H:%M",
         tm,
     );
     if (len != state.time_len or
         !std.mem.eql(u8, buf[0..len], state.time_buf[0..state.time_len]))
     {
-        @memcpy(state.time_buf[0..len], buf[0..len]);
-        state.time_len = len;
-        state.time_text_width = 0;
         state.time_text_width = 0;
         for (buf[0..len], 0..) |ch, i| {
-            state.time_buf[i] = ch;
-            state.time_glyphs[i] = try state.font.rasterizeCharUtf32(ch, .default);
+            if (ch != state.time_buf[i]) {
+                state.time_buf[i] = ch;
+                state.time_glyphs[i] = try state.font.rasterizeCharUtf32(ch, .default);
+            }
             state.time_text_width += state.time_glyphs[i].advance.x;
         }
+        state.time_len = len;
     }
     const src_paint = solid_fill_cache.get(settings.color);
     var left = scaled_width - right - state.time_text_width;
@@ -433,16 +440,36 @@ pub fn main(init: std.process.Init) !void {
             _ = entry.image.unref();
         }
     }
+    const settings_parsed: ?Settings = blk: {
+        const config_dir = Io.Dir.openDirAbsolute(io, "/home/elden/.config/zsb/", .{}) catch {
+            break :blk null;
+        };
+        const config = Io.Dir.readFileAllocOptions(config_dir, io, "settings.zon", gpa.allocator(), .unlimited, .of(u8), 0) catch {
+            break :blk null;
+        };
+        defer gpa.allocator().free(config);
+
+        @setEvalBranchQuota(10000);
+        break :blk std.zon.parse.fromSliceAlloc(Settings, gpa.allocator(), config, null, .{ .ignore_unknown_fields = true }) catch inblk: {
+            std.log.err("Couldn't parse settings.zon, please fix it. Using default configuration", .{});
+            break :inblk null;
+        };
+    };
+    if (settings_parsed) |sp| {
+        settings = sp;
+    } else {
+        settings = Settings{};
+    }
     const epfd: i32 = @intCast(linux.epoll_create());
     panic_errno(epfd);
     defer _ = linux.close(epfd);
-    const timerfd: i32 = @intCast(linux.timerfd_create(linux.TIMERFD_CLOCK.REALTIME, .{ .NONBLOCK = true }));
+    const timerfd: i32 = @intCast(linux.timerfd_create(.REALTIME, .{ .NONBLOCK = true }));
     defer _ = linux.close(timerfd);
     panic_errno(timerfd);
     var time_spec: linux.timespec = undefined;
     panic_errno_usize(linux.clock_gettime(.REALTIME, &time_spec));
     const timer_flag = linux.itimerspec{
-        .it_interval = .{ .sec = 1, .nsec = 0 },
+        .it_interval = .{ .sec = settings.right_redraw_interval, .nsec = 0 },
         .it_value = .{ .sec = time_spec.sec + 1, .nsec = 0 },
     };
 
@@ -491,26 +518,6 @@ pub fn main(init: std.process.Init) !void {
     const layer_surface = try layer_shell.getLayerSurface(surface, output, .top, "status_bar");
     defer layer_surface.destroy();
 
-    const settings_parsed: ?Settings = blk: {
-        const config_dir = Io.Dir.openDirAbsolute(io, "/home/elden/.config/zsb/", .{}) catch {
-            break :blk null;
-        };
-        const config = Io.Dir.readFileAllocOptions(config_dir, io, "settings.zon", gpa.allocator(), .unlimited, .of(u8), 0) catch {
-            break :blk null;
-        };
-        defer gpa.allocator().free(config);
-
-        @setEvalBranchQuota(10000);
-        break :blk std.zon.parse.fromSliceAlloc(Settings, gpa.allocator(), config, null, .{ .ignore_unknown_fields = true }) catch inblk: {
-            std.log.err("Couldn't parse settings.zon, please fix it. Using default configuration", .{});
-            break :inblk null;
-        };
-    };
-    if (settings_parsed) |sp| {
-        settings = sp;
-    } else {
-        settings = Settings{};
-    }
     scaled_height = settings.height * SCALE;
 
     var font_names = try gpa.allocator().alloc([*:0]const u8, settings.font.len);
@@ -529,7 +536,7 @@ pub fn main(init: std.process.Init) !void {
         return error.OpenBatteryFailed;
     };
     const charge_full_contents = try Io.Dir.readFile(bat_dir, io, "charge_full", &buf);
-    const bat_charge_full = try std.fmt.parseInt(i32, charge_full_contents[0 .. charge_full_contents.len - 1], 10);
+    const bat_charge_full = try std.fmt.parseInt(u32, charge_full_contents[0 .. charge_full_contents.len - 1], 10);
 
     var state = State{
         .surface = surface,
@@ -635,12 +642,13 @@ pub fn main(init: std.process.Init) !void {
             if (epoll_events[o].data.fd == wlfd) {
                 wl_display_read = true;
             } else if (epoll_events[o].data.fd == timerfd) {
-                if (secs % settings.bat_redraw_interval == 0) {
-                    try query_bat(&state, &buf);
-                }
-                secs +%= 1;
                 panic_errno_usize(linux.read(timerfd, &fd_buf, 8));
+                if (secs >= settings.bat_redraw_interval) {
+                    try query_bat(&state, &buf);
+                    secs = 0;
+                }
                 try draw_right(&state, &buf);
+                secs +%= settings.right_redraw_interval;
             } else if (epoll_events[o].data.fd == state.workspacefd) {
                 panic_errno_usize(linux.read(state.workspacefd, &fd_buf, 8));
                 try draw_left(&state);
