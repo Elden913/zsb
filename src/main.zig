@@ -636,8 +636,20 @@ pub fn main(init: std.process.Init) !void {
             if (display.dispatchPending() != .SUCCESS) return error.DispatchFailed;
         }
         if (display.flush() != .SUCCESS) return error.FlushFailed;
-        const n = linux.epoll_wait(epfd, &epoll_events, 4, -1);
+        const n_raw: usize = linux.epoll_wait(epfd, &epoll_events, 4, -1);
+        var n_signed = @as(isize, @bitCast(n_raw));
+        if (n_signed < 0) {
+            const err_code = -n_signed;
+            n_signed = 0;
+            if (err_code == @intFromEnum(std.posix.E.INTR)) {
+                std.debug.print("intr err, continuing\n" , .{});
+            }
+            else {
+                return error.EpollWaitFailed;
+            }
+        }
         var wl_display_read = false;
+        const n: usize = @intCast(n_signed);
         for (0..n) |o| {
             if (epoll_events[o].data.fd == wlfd) {
                 wl_display_read = true;
