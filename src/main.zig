@@ -125,14 +125,7 @@ const SCALE: i32 = 2;
 
 var scaled_height: i32 = 0;
 var scaled_width: i32 = 0;
-var debug_allocator_state: std.heap.DebugAllocator(.{}) = .init;
-
-pub const gpa: std.mem.Allocator = blk: {
-    break :blk switch (builtin.mode) {
-        .Debug, .ReleaseSafe => debug_allocator_state.allocator(),
-        .ReleaseFast, .ReleaseSmall => std.heap.smp_allocator,
-    };
-};
+var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
 const Globals = struct {
     compositor: ?*wl.Compositor = null,
@@ -477,8 +470,14 @@ pub inline fn panic_errno(errno: i32) void {
 pub fn main(init: std.process.Init) !void {
     var buf: [BUF_LEN]u8 = undefined;
     io = init.io;
-    defer if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
-        _ = debug_allocator_state.deinit(); 
+    const gpa, const is_debug = gpa: {
+        break :gpa switch (builtin.mode) {
+            .Debug, .ReleaseSafe => .{ debug_allocator.allocator(), true },
+            .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
+        };
+    };
+    defer if (is_debug) {
+        _ = debug_allocator.deinit();
     };
     defer {
         for (solid_fill_cache.entries[0..solid_fill_cache.count]) |entry| {
