@@ -1,4 +1,8 @@
 const std = @import("std");
+const fcft = @import("fcft");
+const pixman = @import("pixman");
+const pulse_listener = @import("pulse_listener.zig");
+const unicode = std.unicode;
 const Io = std.Io;
 
 pub const pulse = @cImport({
@@ -7,7 +11,7 @@ pub const pulse = @cImport({
 const c = @cImport({
     @cInclude("time.h");
 });
-const dsb = @import("dsb");
+const builtin = @import("builtin");
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const zwlr = wayland.client.zwlr;
@@ -121,7 +125,14 @@ const SCALE: i32 = 2;
 
 var scaled_height: i32 = 0;
 var scaled_width: i32 = 0;
-var gpa: std.heap.DebugAllocator(.{}) = .init;
+var debug_allocator_state: std.heap.DebugAllocator(.{}) = .init;
+
+pub const gpa: std.mem.Allocator = blk: {
+    break :blk switch (builtin.mode) {
+        .Debug, .ReleaseSafe => debug_allocator_state.allocator(),
+        .ReleaseFast, .ReleaseSmall => std.heap.smp_allocator,
+    };
+};
 
 const Globals = struct {
     compositor: ?*wl.Compositor = null,
@@ -214,9 +225,6 @@ fn layer_surface_listener(layer_surface: *zwlr.LayerSurfaceV1, event: zwlr.Layer
         },
     }
 }
-const fcft = @import("fcft");
-const pixman = @import("pixman");
-const unicode = std.unicode;
 
 inline fn pixman_color_from_u32(color: u32) pixman.Color {
     const alpha = (color & 0xff000000) >> 24;
@@ -466,10 +474,12 @@ pub inline fn panic_errno(errno: i32) void {
         std.debug.panic("err: {}", .{err});
     }
 }
-const pulse_listener = @import("pulse_listener.zig");
 pub fn main(init: std.process.Init) !void {
     var buf: [BUF_LEN]u8 = undefined;
     io = init.io;
+    defer if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+        _ = debug_allocator_state.deinit(); 
+    };
     defer {
         for (solid_fill_cache.entries[0..solid_fill_cache.count]) |entry| {
             _ = entry.image.unref();
@@ -479,13 +489,13 @@ pub fn main(init: std.process.Init) !void {
         const config_dir = Io.Dir.openDirAbsolute(io, "/home/elden/.config/zsb/", .{}) catch {
             break :blk null;
         };
-        const config = Io.Dir.readFileAllocOptions(config_dir, io, "settings.zon", gpa.allocator(), .unlimited, .of(u8), 0) catch {
+        const config = Io.Dir.readFileAllocOptions(config_dir, io, "settings.zon", gpa, .unlimited, .of(u8), 0) catch {
             break :blk null;
         };
-        defer gpa.allocator().free(config);
+        defer gpa.free(config);
 
         @setEvalBranchQuota(10000);
-        break :blk std.zon.parse.fromSliceAlloc(Settings, gpa.allocator(), config, null, .{ .ignore_unknown_fields = true }) catch inblk: {
+        break :blk std.zon.parse.fromSliceAlloc(Settings, gpa, config, null, .{ .ignore_unknown_fields = true }) catch inblk: {
             std.log.err("Couldn't parse settings.zon, please fix it. Using default configuration", .{});
             break :inblk null;
         };
@@ -559,15 +569,15 @@ pub fn main(init: std.process.Init) !void {
 
     scaled_height = settings.height * SCALE;
 
-    var font_names = try gpa.allocator().alloc([*:0]const u8, settings.font.len);
+    var font_names = try gpa.alloc([*:0]const u8, settings.font.len);
     for (0..settings.font.len) |i| {
-        font_names[i] = try gpa.allocator().dupeZ(u8, settings.font[i]);
+        font_names[i] = try gpa.dupeZ(u8, settings.font[i]);
     }
     const font = try fcft.Font.fromName(font_names, null);
     for (font_names) |name| {
-        gpa.allocator().free(std.mem.span(name));
+        gpa.free(std.mem.span(name));
     }
-    gpa.allocator().free(font_names);
+    gpa.free(font_names);
 
     const bat_dir_path = try std.fmt.bufPrint(&buf, "/sys/class/power_supply/BAT{}/", .{settings.bat});
     const bat_dir = Io.Dir.openDirAbsolute(io, bat_dir_path, .{}) catch {
@@ -598,7 +608,7 @@ pub fn main(init: std.process.Init) !void {
     defer state.bat_status_file.close(io);
     defer {
         if (settings_parsed) |sp| {
-            std.zon.parse.free(gpa.allocator(), sp);
+            std.zon.parse.free(gpa, sp);
         }
     }
     try query_bat(&state, &buf);
@@ -640,7 +650,7 @@ pub fn main(init: std.process.Init) !void {
     const stride = scaled_width * 4;
     const size = stride * scaled_height;
     const buffer, state.image = blk: {
-        const fd = try posix.memfd_create("dsb", 0);
+        const fd = try posix.memfd_create("zsb", 0);
         if (posix.errno(posix.system.ftruncate(fd, size)) != .SUCCESS) return error.FtruncateFailed;
         const data = try posix.mmap(
             null,
@@ -703,17 +713,17 @@ pub fn main(init: std.process.Init) !void {
                 panic_errno_usize(sz);
                 const contains = std.mem.findScalar(u8, buf[0..sz], '\n');
                 if (contains) |inx| {
-                    try tags_buf.appendSlice(gpa.allocator(), buf[0..inx]); // TODO: replace allocator
-                    var res = try Parser.parseHybrid(gpa.allocator(), tags_buf.items);
-                    defer res.deinit(gpa.allocator());
+                    try tags_buf.appendSlice(gpa, buf[0..inx]);
+                    var res = try Parser.parseHybrid(gpa, tags_buf.items);
+                    defer res.deinit(gpa);
                     try populate_tags(&state, res, tags_buf.items);
                     if (sz > inx) {
                         tags_buf.clearRetainingCapacity();
-                        try tags_buf.appendSlice(gpa.allocator(), buf[inx..sz]);
+                        try tags_buf.appendSlice(gpa, buf[inx+1..sz]);
                     }
                 }
                 else {
-                    try tags_buf.appendSlice(gpa.allocator(), buf[0..sz]); // TODO: replace allocator
+                    try tags_buf.appendSlice(gpa, buf[0..sz]);
                 }
                 try draw_left(&state);
             } else if (epoll_events[o].data.fd == state.volfd) {
