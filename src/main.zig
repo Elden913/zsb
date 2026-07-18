@@ -11,21 +11,84 @@ const dsb = @import("dsb");
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const zwlr = wayland.client.zwlr;
-const zdwl = wayland.client.zdwl;
 const posix = std.posix;
 const linux = std.os.linux;
+const jsmn = @import("jsmn_zig.zig");
 var io: std.Io = undefined;
+
+const cfg = jsmn.jsmn_default_config();
+const Parser = jsmn.Jsmn(cfg);
+
+const TOKS_LEN: usize = 512;
+
+fn populate_tags(state: *State, res: Parser.HybridResult, buf: []u8) !void {
+    var next_monitor = false;
+    var next_index = false;
+    var next_active = false;
+    var next_urgent = false;
+    var next_client_count = false;
+    var monitor: ?[]const u8 = null;
+    var index: ?usize = null;
+    for (0..res.count()) |i| {
+        const tok = res.getToken(i).?;
+        const typ = tok.getType();
+        const start = tok.getStart();
+        const end = tok.getEnd();
+        const curr = buf[start..end];
+        if (next_monitor and typ == .String) {
+            monitor = curr;
+            next_monitor = false;
+        }
+        if (monitor) |mn| {
+            if (std.mem.eql(u8, mn, settings.monitor)) {
+                if (next_index and typ == .String) {
+                    index = try std.fmt.parseInt(usize, curr, 10) - 1;
+                    next_index = false;
+                }
+                if (next_active and typ == .String) {
+                    state.workspaces[index.?].active = std.mem.eql(u8, curr, "true");
+                    next_active = false;
+                }
+                if (next_urgent and typ == .String) {
+                    state.workspaces[index.?].urgent = std.mem.eql(u8, curr, "true");
+                    next_urgent = false;
+                }
+                if (next_client_count) {
+                    state.workspaces[index.?].client_count = try std.fmt.parseInt(i32, curr, 10);
+                    next_client_count = false;
+                }
+                if (typ == .String and std.mem.eql(u8, curr, "index")) {
+                    next_index = true;
+                }
+                if (typ == .String and std.mem.eql(u8, curr, "is_active")) {
+                    next_active = true;
+                }
+                if (typ == .String and std.mem.eql(u8, curr, "is_urgent")) {
+                    next_urgent = true;
+                }
+                if (typ == .String and std.mem.eql(u8, curr, "client_count")) {
+                    next_client_count = true;
+                }
+            }
+        }
+        if (typ == .String and std.mem.eql(u8, curr, "monitor")) {
+            next_monitor = true;
+        }
+    }
+}
 
 const Workspace = struct {
     active: bool,
     urgent: bool,
-    shown: bool,
+    client_count: i32,
 };
 
 var DEFAULT_FONT = [_][]const u8{"monospace:size=30"};
 
 const Settings = struct {
     font: [][]const u8 = DEFAULT_FONT[0..],
+
+    monitor: []const u8 = "eDP-1",
 
     background: u32 = 0xFF0f1416,
     color: u32 = 0xFFdee3e6,
@@ -65,7 +128,6 @@ const Globals = struct {
     shm: ?*wl.Shm = null,
     output: ?*wl.Output = null,
     layer_shell: ?*zwlr.LayerShellV1 = null,
-    dwl_ipc: ?*zdwl.IpcManagerV2 = null,
 };
 pub const State = struct {
     buffer: *wl.Buffer = undefined,
@@ -109,41 +171,16 @@ pub const State = struct {
     bat_text_color: u32,
 
     workspacefd: i32,
-    workspaces: []Workspace,
+    workspaces: [32]Workspace = @splat(Workspace {
+        .urgent = false,
+        .active = false,
+        .client_count = 0,
+    }),
 
     prev_tear_left: i32 = 0,
     prev_tear_right: i32 = 0,
 };
 var settings: Settings = undefined;
-
-fn dwl_ipc_manager_listener(dwl_ipc_manager: *zdwl.IpcManagerV2, event: zdwl.IpcManagerV2.Event, state: *State) void {
-    _ = dwl_ipc_manager;
-    switch (event) {
-        .tags => |ev| {
-            state.workspaces = gpa.allocator().alloc(Workspace, ev.amount) catch @panic("couldn't allocate workspaces");
-        },
-        else => return,
-    }
-}
-
-fn dwl_ipc_output_listener(dwl_output: *zdwl.IpcOutputV2, event: zdwl.IpcOutputV2.Event, state: *State) void {
-    _ = dwl_output;
-    switch (event) {
-        .tag => |ev| {
-            const active = ev.state == .active;
-            const urgent = ev.state == .urgent;
-
-            state.workspaces[ev.tag] = Workspace{
-                .active = active,
-                .urgent = urgent,
-                .shown = (active or urgent) or ev.clients > 0,
-            };
-            const val: [8]u8 = @bitCast(@as(u64, 1));
-            panic_errno_usize(std.os.linux.write(state.workspacefd, &val, 8));
-        },
-        else => return,
-    }
-}
 
 fn registry_listener(registry: *wl.Registry, event: wl.Registry.Event, globals: *Globals) void {
     switch (event) {
@@ -156,8 +193,6 @@ fn registry_listener(registry: *wl.Registry, event: wl.Registry.Event, globals: 
                 globals.output = registry.bind(ev.name, wl.Output, ev.version) catch return;
             } else if (std.mem.orderZ(u8, ev.interface, zwlr.LayerShellV1.interface.name) == .eq) {
                 globals.layer_shell = registry.bind(ev.name, zwlr.LayerShellV1, ev.version) catch return;
-            } else if (std.mem.orderZ(u8, ev.interface, zdwl.IpcManagerV2.interface.name) == .eq) {
-                globals.dwl_ipc = registry.bind(ev.name, zdwl.IpcManagerV2, ev.version) catch return;
             }
         },
         .global_remove => |ev| {
@@ -396,7 +431,7 @@ fn draw_right(state: *State, buf: []u8) !void {
 fn draw_left(state: *State) !void {
     var n_shown: i32 = 0;
     for (state.workspaces, 0..state.workspaces.len) |wp, i| {
-        if (wp.shown) {
+        if (wp.client_count > 0 or wp.active or wp.urgent) {
             var bgcol: u32 = settings.tag_inactive_bg;
             var fgcol: u32 = settings.tag_inactive_fg;
             if (wp.active) {
@@ -482,7 +517,11 @@ pub fn main(init: std.process.Init) !void {
 
     var pulse_epoll_event = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = pulsefd } };
     panic_errno_usize(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, pulsefd, &pulse_epoll_event));
-    const workspacefd: i32 = @intCast(linux.eventfd(0, linux.EFD.NONBLOCK));
+    const mango_ipc = std.process.spawn(io, .{
+        .argv = &.{"/usr/bin/mmsg", "watch", "all-tags"},
+        .stdout = .pipe,
+    }) catch return error.MmsgMangoIpcNotFound;
+    const workspacefd: i32 = mango_ipc.stdout.?.handle;
     defer _ = linux.close(workspacefd);
 
     var workspace_epoll_event = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = workspacefd } };
@@ -553,25 +592,17 @@ pub fn main(init: std.process.Init) !void {
         .vol_muted = std.atomic.Value(bool).init(false),
         .vol_text_color = settings.color,
         .workspacefd = workspacefd,
-        .workspaces = undefined,
     };
     defer state.bat_charge_now_file.close(io);
     defer state.bat_current_now_file.close(io);
     defer state.bat_status_file.close(io);
-    defer gpa.allocator().free(state.workspaces);
     defer {
         if (settings_parsed) |sp| {
             std.zon.parse.free(gpa.allocator(), sp);
         }
     }
     try query_bat(&state, &buf);
-    const dwl_ipc = globals.dwl_ipc orelse return error.NoWldwl_ipc;
-    defer dwl_ipc.destroy();
-    dwl_ipc.setListener(*State, &dwl_ipc_manager_listener, &state);
-    if (display.roundtrip() != .SUCCESS) return error.RoundtripFailed;
-    const dwl_output = try dwl_ipc.getOutput(output);
-    dwl_output.setListener(*State, &dwl_ipc_output_listener, &state);
-
+    
     const m = pulse.pa_threaded_mainloop_new();
     if (m == null) return error.PulseAudioMainloopFailed;
     defer pulse.pa_threaded_mainloop_free(m);
@@ -599,6 +630,7 @@ pub fn main(init: std.process.Init) !void {
     });
     layer_surface.setExclusiveZone(settings.height);
     layer_surface.setListener(*State, &layer_surface_listener, &state);
+    layer_surface.setSize(0, @intCast(settings.height));
 
     surface.commit();
     while (!state.configured) {
@@ -631,11 +663,16 @@ pub fn main(init: std.process.Init) !void {
     var epoll_events: [4]linux.epoll_event = undefined;
     var fd_buf: [8]u8 = undefined;
     var secs: u32 = 0;
+
+    
+    var tags_buf: std.ArrayList(u8) = .empty;
+    
+
     while (state.running) {
         while (!display.prepareRead()) {
             if (display.dispatchPending() != .SUCCESS) return error.DispatchFailed;
         }
-        if (display.flush() != .SUCCESS) return error.FlushFailed;
+        _ = display.flush();
         const n_raw: usize = linux.epoll_wait(epfd, &epoll_events, 4, -1);
         var n_signed = @as(isize, @bitCast(n_raw));
         if (n_signed < 0) {
@@ -662,7 +699,22 @@ pub fn main(init: std.process.Init) !void {
                 try draw_right(&state, &buf);
                 secs +%= settings.right_redraw_interval;
             } else if (epoll_events[o].data.fd == state.workspacefd) {
-                panic_errno_usize(linux.read(state.workspacefd, &fd_buf, 8));
+                const sz = linux.read(state.workspacefd, &buf, BUF_LEN);
+                panic_errno_usize(sz);
+                const contains = std.mem.findScalar(u8, buf[0..sz], '\n');
+                if (contains) |inx| {
+                    try tags_buf.appendSlice(gpa.allocator(), buf[0..inx]); // TODO: replace allocator
+                    var res = try Parser.parseHybrid(gpa.allocator(), tags_buf.items);
+                    defer res.deinit(gpa.allocator());
+                    try populate_tags(&state, res, tags_buf.items);
+                    if (sz > inx) {
+                        tags_buf.clearRetainingCapacity();
+                        try tags_buf.appendSlice(gpa.allocator(), buf[inx..sz]);
+                    }
+                }
+                else {
+                    try tags_buf.appendSlice(gpa.allocator(), buf[0..sz]); // TODO: replace allocator
+                }
                 try draw_left(&state);
             } else if (epoll_events[o].data.fd == state.volfd) {
                 panic_errno_usize(linux.read(state.volfd, &fd_buf, 8));

@@ -23,15 +23,11 @@ pub fn build(b: *std.Build) void {
 
     scanner.addSystemProtocol("stable/xdg-shell/xdg-shell.xml");
     scanner.addCustomProtocol(.{ .cwd_relative = "/usr/share/wlr-protocols/unstable/wlr-layer-shell-unstable-v1.xml" });
-    scanner.addCustomProtocol(.{ .cwd_relative = "dwl-ipc-unstable-v2-client.xml" });
-    scanner.addSystemProtocol("staging/ext-workspace/ext-workspace-v1.xml");
 
     scanner.generate("wl_compositor", 4);
     scanner.generate("wl_shm", 1);
     scanner.generate("wl_output", 1);
     scanner.generate("zwlr_layer_shell_v1", 1);
-    scanner.generate("ext_workspace_manager_v1", 1);
-    scanner.generate("zdwl_ipc_manager_v2", 2);
 
     const pixman = b.dependency("pixman", .{
     });

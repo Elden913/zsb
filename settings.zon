@@ -1,6 +1,7 @@
 // Default settings
 .{
     .font = .{"monospace:size=30"},
+    .monitor = "eDP-1",
 
     .background = 0xFF0f1416,
     .color = 0xFFdee3e6,
