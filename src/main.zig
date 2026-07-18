@@ -411,7 +411,7 @@ fn draw_time(state: *State, buf: []u8, right: i32) !i32 {
 }
 
 fn draw_right(state: *State, buf: []u8) !void {
-    _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, 0, 0, scaled_width, scaled_height, settings.background);
+    _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, scaled_width - state.prev_tear_right, 0, state.prev_tear_right, scaled_height, settings.background);
     var right: i32 = 0;
     right += settings.separator_gap;
     right += try draw_time(state, buf, right);
@@ -663,19 +663,20 @@ pub fn main(init: std.process.Init) !void {
 
         break :blk .{ try pool.createBuffer(0, scaled_width, scaled_height, stride, wl.Shm.Format.argb8888), pixman.Image.createBits(.a8r8g8b8, scaled_width, scaled_height, @ptrCast(data), stride) orelse return error.PixmanCreateBitsFailed };
     };
+    _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, 0, 0, scaled_width, scaled_height, settings.background);
     state.buffer = buffer;
     defer _ = state.image.?.unref();
     defer state.buffer.destroy();
     var tags_buf: std.ArrayList(u8) = .empty;
-    const all_tags = std.process.spawn(io, .{
-        .argv = &.{"/usr/bin/mmsg", "get", "all-tags"},
-        .stdout = .pipe,
-    }) catch return error.MmsgMangoIpcNotFound;
-    var reader = all_tags.stdout.?.reader(io, &buf);
-    try reader.interface.appendRemainingUnlimited(gpa, &tags_buf);
-    var re = try Parser.parseHybrid(gpa, tags_buf.items);
-    try populate_tags(&state, re, tags_buf.items);
-    re.deinit(gpa);
+    // const all_tags = std.process.spawn(io, .{
+    //     .argv = &.{"/usr/bin/mmsg", "get", "all-tags"},
+    //     .stdout = .pipe,
+    // }) catch return error.MmsgMangoIpcNotFound;
+    // var reader = all_tags.stdout.?.reader(io, &buf);
+    // try reader.interface.appendRemainingUnlimited(gpa, &tags_buf);
+    // var re = try Parser.parseHybrid(gpa, tags_buf.items);
+    // try populate_tags(&state, re, tags_buf.items);
+    // re.deinit(gpa);
     
     try draw_left(&state);
     try draw_right(&state, &buf);
