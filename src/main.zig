@@ -421,7 +421,6 @@ fn draw_right(state: *State, buf: []u8) !void {
     right += try draw_bat(state, buf, right);
 
     const max_tear = @max(state.prev_tear_right, right);
-    _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, scaled_width - max_tear, 0, max_tear - right, scaled_height, settings.background);
 
     state.surface.damageBuffer(scaled_width - max_tear, 0, max_tear, scaled_height);
     state.prev_tear_right = right;
@@ -661,7 +660,7 @@ pub fn main(init: std.process.Init) !void {
         const pool = try shm.createPool(fd, size);
         defer pool.destroy();
 
-        break :blk .{ try pool.createBuffer(0, scaled_width, scaled_height, stride, wl.Shm.Format.argb8888), pixman.Image.createBits(.a8r8g8b8, scaled_width, scaled_height, @ptrCast(data), stride) orelse return error.PixmanCreateBitsFailed };
+        break :blk .{ try pool.createBuffer(0, scaled_width, scaled_height, stride, wl.Shm.Format.argb8888), pixman.Image.createBits(.a8r8g8b8, scaled_width, scaled_height, @ptrCast(data.ptr), stride) orelse return error.PixmanCreateBitsFailed };
     };
     _ = pixman.fill(state.image.?.getData().?, scaled_width, 32, 0, 0, scaled_width, scaled_height, settings.background);
     state.buffer = buffer;
@@ -674,7 +673,6 @@ pub fn main(init: std.process.Init) !void {
     var epoll_events: [4]linux.epoll_event = undefined;
     var fd_buf: [8]u8 = undefined;
     var secs: u32 = 0;
-    
 
     while (state.running) {
         while (!display.prepareRead()) {

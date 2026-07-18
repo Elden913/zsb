@@ -19,5 +19,5 @@ Theme loading (~/.config/zsb/settings.zon) Check src/main.zig for fields
 Build:
 
 ```
-zig build -Doptimize=ReleaseFast
+zig build -Doptimize=ReleaseSafe
 ````
