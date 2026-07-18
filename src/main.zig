@@ -532,7 +532,6 @@ pub fn main(init: std.process.Init) !void {
     }) catch return error.MmsgMangoIpcNotFound;
     const workspacefd: i32 = mango_ipc.stdout.?.handle;
     defer _ = linux.close(workspacefd);
-
     var workspace_epoll_event = linux.epoll_event{ .events = linux.EPOLL.IN, .data = .{ .fd = workspacefd } };
     panic_errno_usize(linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, workspacefd, &workspace_epoll_event));
 
@@ -667,14 +666,22 @@ pub fn main(init: std.process.Init) !void {
     state.buffer = buffer;
     defer _ = state.image.?.unref();
     defer state.buffer.destroy();
+    var tags_buf: std.ArrayList(u8) = .empty;
+    const all_tags = std.process.spawn(io, .{
+        .argv = &.{"/usr/bin/mmsg", "get", "all-tags"},
+        .stdout = .pipe,
+    }) catch return error.MmsgMangoIpcNotFound;
+    var reader = all_tags.stdout.?.reader(io, &buf);
+    try reader.interface.appendRemainingUnlimited(gpa, &tags_buf);
+    var re = try Parser.parseHybrid(gpa, tags_buf.items);
+    try populate_tags(&state, re, tags_buf.items);
+    re.deinit(gpa);
+    
     try draw_left(&state);
     try draw_right(&state, &buf);
     var epoll_events: [4]linux.epoll_event = undefined;
     var fd_buf: [8]u8 = undefined;
     var secs: u32 = 0;
-
-    
-    var tags_buf: std.ArrayList(u8) = .empty;
     
 
     while (state.running) {
@@ -687,10 +694,7 @@ pub fn main(init: std.process.Init) !void {
         if (n_signed < 0) {
             const err_code = -n_signed;
             n_signed = 0;
-            if (err_code == @intFromEnum(std.posix.E.INTR)) {
-                std.debug.print("intr err, continuing\n" , .{});
-            }
-            else {
+            if (err_code != @intFromEnum(std.posix.E.INTR)) {
                 return error.EpollWaitFailed;
             }
         }
