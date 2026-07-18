@@ -668,15 +668,6 @@ pub fn main(init: std.process.Init) !void {
     defer _ = state.image.?.unref();
     defer state.buffer.destroy();
     var tags_buf: std.ArrayList(u8) = .empty;
-    // const all_tags = std.process.spawn(io, .{
-    //     .argv = &.{"/usr/bin/mmsg", "get", "all-tags"},
-    //     .stdout = .pipe,
-    // }) catch return error.MmsgMangoIpcNotFound;
-    // var reader = all_tags.stdout.?.reader(io, &buf);
-    // try reader.interface.appendRemainingUnlimited(gpa, &tags_buf);
-    // var re = try Parser.parseHybrid(gpa, tags_buf.items);
-    // try populate_tags(&state, re, tags_buf.items);
-    // re.deinit(gpa);
     
     try draw_left(&state);
     try draw_right(&state, &buf);
