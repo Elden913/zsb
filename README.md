@@ -1,3 +1,5 @@
+![Screenshot](./screenshot.png)
+
 Very Simple status bar for wayland (mangowm) written in zig.
 Program is not organized very well, only for personal use.
 
@@ -15,6 +17,7 @@ dependencies:
 - libwayland
 
 Theme loading (~/.config/zsb/settings.zon) Check src/main.zig for fields
+Default setting in the settings.zon
 
 Build:
 
